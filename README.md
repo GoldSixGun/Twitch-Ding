@@ -13,7 +13,7 @@
 ---
 
 ## 🌐 Live Demo
-👉 [**Click here to try it!**](https://goldsixgun.github.io/twitch-ding/)  
+👉 [**Click here to try it!**](https://goldsixgun.github.io/Twitch-Ding/)
 
 *(If you don’t hear anything, click **Start** first to unlock audio, then **Connect** with your Twitch channel name.)*  
 
