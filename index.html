@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Twitch Chat Ding (Skip Bots)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{font-family:system-ui,Arial,sans-serif;margin:24px;color:#eaeaea;background:#111}
+  input,button{font-size:16px}
+  #log{margin-top:16px;height:280px;overflow:auto;border:1px solid #333;padding:8px;background:#181818}
+  #status{margin-top:8px;font-weight:600}
+  .row{margin:8px 0}
+  .small{font-size:12px;color:#bbb}
+  code{background:#222;padding:0 4px;border-radius:4px}
+</style>
+</head>
+<body>
+<h1>Twitch Chat Ding (Skip Bots)</h1>
+<p>Click Start, enter your channel (no #, no URL), then Connect. Beeps only for non-bot messages.</p>
+
+<div class="row">
+  <button id="start">Start</button>
+  <button id="test">Test Beep</button>
+</div>
+
+<div class="row">
+  <label>Channel: <input id="chan" placeholder="yourchannel"></label>
+  <button id="connect">Connect</button>
+</div>
+
+<div class="row">
+  <label>Blocked names (comma-separated): 
+    <input id="blocked" size="60"
+      value="streamelements,wizebot,soundalerts,sery_bot,serybot,frostytoolsdotcom">
+  </label>
+  <span class="small">Usernames are matched case-insensitively against Twitch login.</span>
+</div>
+
+<div id="status">Audio: locked • Not connected</div>
+<div class="small" id="counters">Beeped: 0 • Skipped (bots): 0</div>
+<div id="log"></div>
+
+<script>
+let ctx, audioReady=false, ws=null;
+let beeped=0, skipped=0;
+
+function log(msg){
+  const el=document.getElementById('log');
+  const d=document.createElement('div');
+  d.textContent=msg;
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+function setStatus(s){ document.getElementById('status').textContent=s; }
+function updateCounters(){
+  document.getElementById('counters').textContent = `Beeped: ${beeped} • Skipped (bots): ${skipped}`;
+}
+
+// louder, sharper default so it cuts through
+function beep(ms=160, hz=2100, vol=0.22){
+  if(!audioReady) return;
+  const o=ctx.createOscillator(), g=ctx.createGain(), t=ctx.currentTime;
+  o.type="square";
+  o.frequency.setValueAtTime(hz,t);
+  g.gain.setValueAtTime(vol,t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+ms/1000);
+  o.connect(g).connect(ctx.destination);
+  o.start(t);
+  o.stop(t+ms/1000+0.02);
+}
+
+function parseTags(raw){
+  // raw like "@badge-info=;badges=;color=... :nick!nick@nick.tmi.twitch.tv PRIVMSG #chan :msg"
+  const m = /^@([^ ]*) /.exec(raw);
+  const tags = {};
+  if (m && m[1]) {
+    m[1].split(';').forEach(kv=>{
+      const [k,...rest]=kv.split('=');
+      tags[k]=decodeURIComponent((rest.join('=')||'').replace(/\+/g,' '));
+    });
+  }
+  return tags;
+}
+
+function getLogin(raw){
+  // Try tags 'login' if present; otherwise pull from prefix
+  const tags = parseTags(raw);
+  if (tags['login']) return tags['login'].toLowerCase();
+  const m = /:([a-zA-Z0-9_]+)!/.exec(raw);
+  return m ? m[1].toLowerCase() : 'unknown';
+}
+
+function getBlockedSet(){
+  const txt = document.getElementById('blocked').value
+    .split(',')
+    .map(s=>s.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(txt);
+}
+
+document.getElementById('start').onclick=async ()=>{
+  try{
+    ctx=new (window.AudioContext||window.webkitAudioContext)();
+    await ctx.resume();
+    audioReady=true;
+    setStatus("Audio: ready • Not connected");
+    beep(140,1200,0.18);
+  }catch(e){
+    setStatus("Audio: failed • Not connected");
+    log("Audio error: "+e);
+  }
+};
+
+document.getElementById('test').onclick=()=>{ if(!audioReady){alert("Click Start first.");return;} beep(); };
+
+document.getElementById('connect').onclick=()=>{
+  const raw=document.getElementById('chan').value.trim();
+  if(!raw){ alert("Enter a channel name."); return; }
+  if(!audioReady){ alert("Click Start first."); return; }
+
+  const channel=raw.toLowerCase()
+                    .replace(/^#+/,'')
+                    .replace(/^https?:\/\/(www\.)?twitch\.tv\//,'');
+
+  try{ if(ws) ws.close(); }catch(e){}
+  beeped=0; skipped=0; updateCounters();
+  setStatus("Audio: ready • Connecting…");
+
+  ws=new WebSocket("wss://irc-ws.chat.twitch.tv:443");
+  ws.onopen=()=>{
+    ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands");
+    ws.send("NICK justinfan"+Math.floor(Math.random()*100000)); // anonymous read-only
+    ws.send("JOIN #"+channel);
+    log("Connecting to #"+channel+"…");
+  };
+  ws.onerror=()=>{ log("WebSocket error"); setStatus("Audio: ready • Connection error"); };
+  ws.onclose=()=>{ log("Disconnected."); setStatus("Audio: ready • Disconnected"); };
+
+  ws.onmessage=(ev)=>{
+    const line=ev.data;
+
+    if (line.startsWith("PING")) { ws.send("PONG :tmi.twitch.tv"); return; }
+
+    if (line.includes(" 366 ") && line.includes("#"+channel)) {
+      setStatus("Audio: ready • Connected to "+channel);
+      log("Joined #"+channel);
+      beep(200,1000,0.26);
+      return;
+    }
+
+    if (line.includes(`PRIVMSG #${channel} :`)) {
+      const login = getLogin(line); // twitch login (lowercase)
+      const blocked = getBlockedSet();
+      if (blocked.has(login)) {
+        skipped++; updateCounters();
+        return; // ignore bots
+      }
+      // optional: also skip if tags include a bot badge (rare)
+      const tags = parseTags(line);
+      if ((tags['badges']||'').includes('bot/1')) {
+        skipped++; updateCounters();
+        return;
+      }
+
+      beeped++; updateCounters();
+      beep();
+
+      const msg = line.split(`PRIVMSG #${channel} :`)[1] || "";
+      const display = tags['display-name'] || login;
+      log(`[${new Date().toLocaleTimeString()}] ${display}: ${msg}`);
+    }
+  };
+};
+
+window.addEventListener('error', e=>{ log("JS error: "+(e.message||e)); });
+</script>
+</body>
+</html>
